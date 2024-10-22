@@ -1,26 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
 contract MultisignatureWallet {
-    using SafeERC20 for IERC20;
-
     // signers mapping
     mapping(address => bool) public isSigner;
     // signer count
     uint256 public signerCount;
     // required approvals
     uint256 public immutable requiredApprovals;
-    // token
-    IERC20 public immutable token;
-    // balance
-    uint256 public balance;
 
     // proposal type
     enum ProposalType {
-        Transfer,
+        Execute,
         AddSigner,
         RemoveSigner
     }
@@ -28,7 +19,8 @@ contract MultisignatureWallet {
     // proposal struct
     struct Proposal {
         address to;
-        uint256 amount;
+        uint256 value;
+        bytes data;
         uint256 approvals;
         mapping(address => bool) hasApproved;
         bool executed;
@@ -45,29 +37,29 @@ contract MultisignatureWallet {
     error InvalidParameters();
     error ProposalAlreadyExecuted();
     error InsufficientApprovals();
-    error InsufficientBalance();
-    error NotSigner();
+    error ExecutionFailed();
     error CannotRemoveSigner();
+    error InsufficientBalance();
 
-    event Deposit(address indexed user, uint256 amount);
     event ProposalCreated(
-        uint256 indexed proposalId, address to, uint256 amount, ProposalType proposalType, address signerToAddOrRemove
+        uint256 indexed proposalId,
+        address to,
+        uint256 value,
+        bytes data,
+        ProposalType proposalType,
+        address signerToAddOrRemove
     );
     event ProposalApproved(uint256 indexed proposalId, address signer);
     event ProposalExecuted(
-        uint256 indexed proposalId, address to, uint256 amount, ProposalType proposalType, address signerToAddOrRemove
+        uint256 indexed proposalId, address to, uint256 value, ProposalType proposalType, address signerToAddOrRemove
     );
     event SignerAdded(address signer);
     event SignerRemoved(address signer);
-    event SignerTransfer(address to, uint256 amount);
 
-    constructor(address _token, address[] memory _signers, uint256 _requiredApprovals) {
-        // check if parameters are valid
+    constructor(address[] memory _signers, uint256 _requiredApprovals) {
         if (_signers.length == 0 || _requiredApprovals == 0 || _requiredApprovals > _signers.length) {
             revert InvalidParameters();
         }
-
-        token = IERC20(_token);
 
         for (uint256 i = 0; i < _signers.length; i++) {
             isSigner[_signers[i]] = true;
@@ -85,7 +77,8 @@ contract MultisignatureWallet {
     // create proposal
     function createProposal(
         address to,
-        uint256 amount,
+        uint256 value,
+        bytes memory data,
         ProposalType proposalType,
         address signerToAddOrRemove
     )
@@ -95,13 +88,12 @@ contract MultisignatureWallet {
         uint256 proposalId = proposalCount++;
         Proposal storage proposal = proposals[proposalId];
         proposal.to = to;
-        proposal.amount = amount;
-        // set proposal type
+        proposal.value = value;
+        proposal.data = data;
         proposal.proposalType = proposalType;
-        // set signer to add or remove
         proposal.signerToAddOrRemove = signerToAddOrRemove;
 
-        emit ProposalCreated(proposalId, to, amount, proposalType, signerToAddOrRemove);
+        emit ProposalCreated(proposalId, to, value, data, proposalType, signerToAddOrRemove);
     }
 
     // approve proposal
@@ -110,9 +102,7 @@ contract MultisignatureWallet {
         if (proposal.executed) revert ProposalAlreadyExecuted();
         if (proposal.hasApproved[msg.sender]) return;
 
-        // increase approvals
         proposal.approvals++;
-        // set approved
         proposal.hasApproved[msg.sender] = true;
 
         emit ProposalApproved(proposalId, msg.sender);
@@ -126,19 +116,16 @@ contract MultisignatureWallet {
 
         proposal.executed = true;
 
-        if (proposal.proposalType == ProposalType.Transfer) {
-            if (proposal.amount > balance) revert InsufficientBalance();
-            // transfer token to the address first
-            token.safeTransfer(proposal.to, proposal.amount);
-            // then update balance
-            balance -= proposal.amount;
-            // emit signer transfer
-            emit SignerTransfer(proposal.to, proposal.amount);
+        if (proposal.proposalType == ProposalType.Execute) {
+            // only execute if there is enough balance
+            if (address(this).balance < proposal.value) revert InsufficientBalance();
+            // transfer the value to the to address with the proposal.data
+            (bool success,) = proposal.to.call{ value: proposal.value }(proposal.data);
+            if (!success) revert ExecutionFailed();
         } else if (proposal.proposalType == ProposalType.AddSigner) {
             if (!isSigner[proposal.signerToAddOrRemove]) {
                 isSigner[proposal.signerToAddOrRemove] = true;
                 signerCount++;
-                // emit signer added
                 emit SignerAdded(proposal.signerToAddOrRemove);
             }
         } else if (proposal.proposalType == ProposalType.RemoveSigner) {
@@ -146,14 +133,12 @@ contract MultisignatureWallet {
                 if (signerCount <= requiredApprovals) revert CannotRemoveSigner();
                 isSigner[proposal.signerToAddOrRemove] = false;
                 signerCount--;
-                // emit signer removed
                 emit SignerRemoved(proposal.signerToAddOrRemove);
             }
         }
 
-        // emit proposal executed
         emit ProposalExecuted(
-            proposalId, proposal.to, proposal.amount, proposal.proposalType, proposal.signerToAddOrRemove
+            proposalId, proposal.to, proposal.value, proposal.proposalType, proposal.signerToAddOrRemove
         );
     }
 
@@ -162,13 +147,6 @@ contract MultisignatureWallet {
         return proposals[proposalId].hasApproved[signer];
     }
 
-    // deposit
-    function deposit(uint256 amount) external {
-        if (amount == 0) revert InvalidParameters();
-
-        token.safeTransferFrom(msg.sender, address(this), amount);
-        balance += amount;
-
-        emit Deposit(msg.sender, amount);
-    }
+    // receive Ether
+    receive() external payable { }
 }
