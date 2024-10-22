@@ -3,6 +3,13 @@ pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
 import "../src/MultisignatureWallet.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract MockERC20 is ERC20 {
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {
+        _mint(msg.sender, 1_000_000 * 10 ** 18); // 铸造 1,000,000 代币
+    }
+}
 
 contract MultisignatureWalletTest is Test {
     MultisignatureWallet public wallet;
@@ -13,6 +20,8 @@ contract MultisignatureWalletTest is Test {
     address public user2;
     address public user3;
     address public nonSigner;
+
+    MockERC20 public mockToken;
 
     function setUp() public {
         user1 = address(0x1);
@@ -25,6 +34,10 @@ contract MultisignatureWalletTest is Test {
 
         // deal 10 ETH
         vm.deal(address(wallet), 10 ether);
+
+        mockToken = new MockERC20("Mock Token", "MCK");
+        // transfer 1000 mock tokens to the wallet
+        mockToken.transfer(address(wallet), 1000 * 10 ** 18);
     }
 
     function testConstructor() public {
@@ -166,5 +179,34 @@ contract MultisignatureWalletTest is Test {
         (bool success,) = address(wallet).call{ value: 1 ether }("");
         require(success, "Failed to send Ether");
         assertEq(address(wallet).balance, initialBalance + 1 ether);
+    }
+
+    function testExecuteERC20Transfer() public {
+        address recipient = address(0x123);
+        uint256 transferAmount = 100 * 10 ** 18;
+
+        // create ERC20 transfer proposal
+        bytes memory data = abi.encode(address(mockToken));
+        vm.prank(user1);
+        wallet.createProposal(recipient, transferAmount, data, MultisignatureWallet.ProposalType.Execute, address(0));
+
+        // approve proposal
+        vm.prank(user2);
+        wallet.approveProposal(0);
+
+        vm.prank(user3);
+        wallet.approveProposal(0);
+
+        // execute ERC20 transfer
+        uint256 initialBalance = mockToken.balanceOf(recipient);
+        wallet.executeERC20Transfer(0);
+
+        // verify transfer result
+        assertEq(mockToken.balanceOf(recipient), initialBalance + transferAmount);
+        assertEq(mockToken.balanceOf(address(wallet)), 900 * 10 ** 18); // 1000 - 100
+
+        // verify proposal executed
+        (,,,, bool executed,,) = wallet.proposals(0);
+        assertTrue(executed);
     }
 }
