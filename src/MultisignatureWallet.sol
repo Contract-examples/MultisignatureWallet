@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@solady/utils/SafeTransferLib.sol";
+
 contract MultisignatureWallet {
     // signers mapping
     mapping(address => bool) public isSigner;
@@ -40,6 +43,7 @@ contract MultisignatureWallet {
     error ExecutionFailed();
     error CannotRemoveSigner();
     error InsufficientBalance();
+    error InvalidProposalType();
 
     event ProposalCreated(
         uint256 indexed proposalId,
@@ -149,4 +153,41 @@ contract MultisignatureWallet {
 
     // receive Ether
     receive() external payable { }
+
+    // ERC20 transfer
+    function _ERC20Transfer(address _ERC20Address, address _to, uint256 _amount) internal {
+        IERC20 erc20 = IERC20(_ERC20Address);
+        SafeTransferLib.safeTransfer(address(erc20), _to, _amount);
+    }
+
+    // get the amount of ERC20 tokens in the specified wallet address
+    function _getBalance(address _ERC20Address, address _addr) private view returns (uint256) {
+        IERC20 erc20 = IERC20(_ERC20Address);
+        uint256 balance = erc20.balanceOf(_addr);
+        return balance;
+    }
+
+    // execute ERC20 transfer
+    function executeERC20Transfer(uint256 proposalId) external {
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.executed) revert ProposalAlreadyExecuted();
+        if (proposal.approvals < requiredApprovals) revert InsufficientApprovals();
+
+        proposal.executed = true;
+
+        if (proposal.proposalType == ProposalType.Execute) {
+            address erc20Address = abi.decode(proposal.data, (address));
+            _ERC20Transfer(erc20Address, proposal.to, proposal.value);
+        } else {
+            revert InvalidProposalType();
+        }
+
+        emit ProposalExecuted(
+            proposalId, proposal.to, proposal.value, proposal.proposalType, proposal.signerToAddOrRemove
+        );
+    }
+
+    function getERC20Balance(address _ERC20Address) public view returns (uint256) {
+        return _getBalance(_ERC20Address, address(this));
+    }
 }
